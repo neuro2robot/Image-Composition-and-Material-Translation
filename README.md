@@ -2,6 +2,11 @@
 
 This project has been inspired by [Diffusion Handles](https://github.com/adobe-research/DiffusionHandles) (Adobe Research).
 
+![Augmentation pipeline: inversion and depth composition, then material translation of the masked object](media/pipeline.svg)
+
+The pipeline has two modules: **image composition** (this folder: `diffhandles/`, `test/`) places a real object into a new scene,
+and **material translation** ([`material_translation/`](material_translation/)) changes the material of the masked object.
+
 ## Data structure for `test/run_multi.sh`
 
 `run_multi.sh` is run from inside `test/` and reads its inputs from `../data/test_new`

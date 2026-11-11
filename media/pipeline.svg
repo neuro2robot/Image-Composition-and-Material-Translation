@@ -1,0 +1,70 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 330" font-family="Helvetica, Arial, sans-serif" font-size="13">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#444"/>
+    </marker>
+  </defs>
+  <rect width="900" height="330" fill="#ffffff"/>
+  <!-- inputs -->
+  <g fill="#cfe0f5" stroke="#4a78b5" stroke-width="1.5">
+    <rect x="20" y="30"  width="120" height="34"/>
+    <rect x="20" y="95"  width="120" height="34"/>
+    <rect x="20" y="230" width="120" height="34"/>
+    <rect x="20" y="285" width="120" height="34"/>
+  </g>
+  <g text-anchor="middle" fill="#111">
+    <text x="80" y="52">Image-1</text>
+    <text x="80" y="117">Image-2</text>
+    <text x="80" y="252">Exemplar Image</text>
+    <text x="80" y="307">Material Property</text>
+  </g>
+  <!-- modules -->
+  <g fill="#fbf2a8" stroke="#a89a1f" stroke-width="1.5">
+    <rect x="200" y="50"  width="110" height="50"/>
+    <rect x="200" y="140" width="110" height="50"/>
+    <rect x="390" y="50"  width="110" height="50"/>
+    <rect x="570" y="50"  width="110" height="50"/>
+    <rect x="390" y="215" width="110" height="50"/>
+    <rect x="570" y="215" width="110" height="50"/>
+  </g>
+  <g text-anchor="middle" fill="#111">
+    <text x="255" y="71">Depth</text><text x="255" y="88">Generation</text>
+    <text x="255" y="161">Inversion</text>
+    <text x="445" y="71">Depth</text><text x="445" y="88">Composition</text>
+    <text x="625" y="71">Image</text><text x="625" y="88">Composition</text>
+    <text x="445" y="236">Mask</text><text x="445" y="253">Generation</text>
+    <text x="625" y="236">Material</text><text x="625" y="253">Translation</text>
+  </g>
+  <!-- output -->
+  <rect x="760" y="130" width="120" height="70" fill="#d6efd2" stroke="#4f9a47" stroke-width="1.5"/>
+  <g text-anchor="middle" fill="#111">
+    <text x="820" y="155">Output Image</text>
+    <text x="820" y="175" font-size="11">background &amp;</text>
+    <text x="820" y="189" font-size="11">material changed</text>
+  </g>
+  <!-- arrows -->
+  <g stroke="#444" stroke-width="1.5" fill="none" marker-end="url(#a)">
+    <path d="M140,47 H200"/>
+    <path d="M140,112 H170 V75 H200"/>
+    <path d="M310,75 H390"/>
+    <path d="M500,75 H570"/>
+    <path d="M140,47 H170 V165 H200"/>
+    <path d="M140,112 H170 V165"/>
+    <path d="M310,165 H540 V92 H570"/>
+    <path d="M625,100 V215"/>
+    <path d="M680,75 H720 V150 H760"/>
+    <path d="M680,240 H720 V180 H760"/>
+    <path d="M500,240 H570"/>
+    <path d="M140,247 H160 V312 H650 V265"/>
+    <path d="M140,302 H600 V265"/>
+    <path d="M625,150 H445 V215"/>
+  </g>
+  <g fill="#555" font-size="11">
+    <text x="318" y="68">Image-1/2 depth</text>
+    <text x="505" y="68">composite depth</text>
+    <text x="318" y="158">activations &amp; latents</text>
+    <text x="632" y="160">composite image</text>
+    <text x="512" y="233" fill="#555">mask</text>
+  </g>
+  <text x="450" y="22" text-anchor="middle" font-size="15" font-weight="bold" fill="#111">Augmentation pipeline: inversion and depth composition, then material translation of the masked object</text>
+</svg>

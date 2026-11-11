@@ -53,11 +53,4 @@ Image encoder and checkpoint come from [h94/IP-Adapter](https://huggingface.co/h
 (`SG161222/RealVisXL_V4.0`, `diffusers/controlnet-depth-sdxl-1.0`) download from Hugging Face. Paths are set at the top of the scripts.
 Output: `<OUTPUT_FOLDER>/<object>/<property>/edited/<property>_00..09.png` plus masks and per-frame metrics CSV.
 
-## Other scripts
-- `dataset_generator.py`, `dataset_generation_july_2026.py` - Blender (bpy) renders of objects with graded property values
-  (reference and modified renders). Default paths inside are machine-specific; pass `--object_root_dir`, `--output_root_dir`, `--hdr_path`.
-- `audit_properties.py` - leave-one-object-out evaluation of directions on generated folders.
-- `masked_clip_direction_audit.py`, `run_masked_clip_audit.py` - masked CLIP trajectory metrics used by the direction builder.
-- `ip_adapter/` - IP-Adapter code.
-
 Dependencies: `requirements.txt` (from ZeST).
