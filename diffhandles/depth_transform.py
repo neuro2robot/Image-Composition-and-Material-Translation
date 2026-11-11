@@ -81,7 +81,7 @@ def transform_depth(
             rot_angle=rot_angle, rot_axis=rot_axis, translation=translation,
             use_input_depth_normalization=use_input_depth_normalization)
     elif depth_transform_mode == "pc":
-        return transform_depth_pc(
+        return transform_depth_pc11(
             depth=depth, bg_depth=bg_depth, fg_mask=fg_mask, intrinsics=intrinsics,
             rot_angle=rot_angle, rot_axis=rot_axis, translation=translation,
             use_input_depth_normalization=use_input_depth_normalization)
@@ -362,6 +362,285 @@ def transform_depth_pc(
 
     return lap_inpainted_depth_map, correspondences
 
+
+def transform_depth_pc11(
+        depth: torch.Tensor, bg_depth: torch.Tensor, fg_mask: torch.Tensor, intrinsics: torch.Tensor,
+        rot_angle: float = None, rot_axis: torch.Tensor = None, translation: torch.Tensor = None,
+        use_input_depth_normalization = False):
+    print("Shape of depth",depth.shape)
+    if not fg_mask.any():
+        # foreground mask is empty, there is no foreground object
+        # return the image depth and empty correspondences
+        if use_input_depth_normalization:
+            _, depth_bounds = normalize_depth(1.0/depth, return_bounds=True)
+        else:
+            depth_bounds = None
+        correspondences = pack_correspondences(
+            torch.tensor([], dtype=torch.int64),
+            torch.tensor([], dtype=torch.int64),
+            torch.tensor([], dtype=torch.int64),
+            torch.tensor([], dtype=torch.int64),
+        )
+        return normalize_depth(1.0/depth, bounds=depth_bounds), correspondences
+    
+    # default transformation parameters
+    if rot_angle is None:
+        rot_angle = 0.0
+    if rot_axis is None:
+        rot_axis = torch.tensor([0.0, 1.0, 0.0], dtype=torch.float32, device=depth.device)
+    if translation is None:
+        translation = torch.tensor([0.0, 0.0, 0.0], dtype=torch.float32, device=depth.device)
+
+    bg_pts = depth_to_world_coords(bg_depth, intrinsics=intrinsics)
+    pts = depth_to_world_coords(depth, intrinsics=intrinsics)
+    
+    device = fg_mask.device
+    
+    if fg_mask.shape[-2] != fg_mask.shape[-1]:
+        raise RuntimeError(f'Expected fg_mask to be square, got shape {fg_mask.shape[-2]} x {fg_mask.shape[-1]}.')
+    img_res = fg_mask.shape[-1]
+    
+    # TODO: change to transform_points and make sure results are exactly the same,
+    # then delete transform_point_cloud (which is not used anywhere else)
+    pts, mod_ids = transform_point_cloud(
+        points=pts.cpu().numpy(),
+        axis=rot_axis.cpu().numpy(),
+        angle_degrees=rot_angle,
+        x=translation[0].item(),
+        y=translation[1].item(),
+        z=translation[2].item(),
+        mask=fg_mask.cpu().numpy()[0, 0])
+
+    #points = pts.reshape((self.img_res**2, 3))
+
+    #orig_pts = pts
+
+    if isinstance(mod_ids, np.ndarray):
+        mod_ids = torch.from_numpy(mod_ids)
+
+    #reproject points to depth map
+
+    reshaped_bg_pts = bg_pts.cpu().numpy().reshape((img_res**2, 3))
+    num_bg_pts = reshaped_bg_pts.shape[0]
+
+    reshaped_pts = pts.reshape((img_res**2, 3))
+
+    new_mod_ids = np.zeros(len(reshaped_bg_pts) + len(reshaped_pts[mod_ids]), dtype = np.uint8)
+
+    new_mod_ids[np.arange(new_mod_ids.size) > len(reshaped_bg_pts) - 1] = 1
+
+    modded_id_list = np.where(mod_ids)[0]
+
+    # idx_to_coord = {}
+    # for idx in modded_id_list:
+    #     pt = reshaped_pts[idx]
+    #     reshaped_bg_pts = np.vstack((reshaped_bg_pts, pt))
+    #     idx_to_coord[len(reshaped_bg_pts) - 1] = divmod(idx, img_res)
+
+    modded_coords = np.stack([modded_id_list // img_res, modded_id_list % img_res], axis=-1)
+    idx_to_coord = {i+num_bg_pts: (modded_coords[i,0].item(), modded_coords[i,1].item()) for i in range(modded_coords.shape[0])}
+    reshaped_bg_pts = np.vstack([reshaped_bg_pts, reshaped_pts[modded_id_list]])
+
+    (rendered_depth, target_mask, transformed_positions_x, transformed_positions_y, orig_visibility_mask) = points_to_depth(
+        points=torch.from_numpy(reshaped_bg_pts).to(device=device),
+        intrinsics=intrinsics,
+        output_size=(img_res, img_res),
+        point_mask=torch.from_numpy(new_mod_ids).to(device=device),
+    )
+
+    # without conversion to disparty
+    direct_depth = rendered_depth
+
+    # get normalized disparity
+    # TODO: depth should be converted to disparity and normalized in the diffuser, not here
+    #       (since requiring disparity and the normalization is specific to the depth-to-image diffuser)
+    if use_input_depth_normalization:
+        _, depth_bounds = normalize_depth(1.0/depth, return_bounds=True)
+    else:
+        depth_bounds = None
+    rendered_depth = normalize_depth(1.0/rendered_depth, bounds=depth_bounds)
+    
+    rendered_depth = rendered_depth[0, 0, ...].cpu().numpy()
+
+    #plot_img(rendered_depth)
+
+    infer_visible_original = np.zeros_like(mod_ids.reshape((img_res, img_res)), dtype = np.uint8)
+
+    original_idxs = [idx_to_coord[key] for key in np.where(orig_visibility_mask)[0]]
+
+    for idx in original_idxs:
+        infer_visible_original[idx] = 1
+
+    original_positions_y, original_positions_x = np.where(infer_visible_original)
+
+    target_mask_uint8 = target_mask.astype(np.uint8)*255
+    
+    # Define a kernel for the closing operation (you can adjust the size and shape)
+    open_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (img_res // 250 , img_res // 250))
+
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (img_res // 50 , img_res // 50))
+
+    target_mask_cleaned = target_mask_uint8
+
+    # Perform the closing operation
+    target_mask_cleaned = cv2.morphologyEx(target_mask_cleaned, cv2.MORPH_CLOSE, kernel)
+
+    # Perform the closing operation
+    target_mask_cleaned = cv2.morphologyEx(target_mask_cleaned, cv2.MORPH_OPEN, open_kernel)
+
+    # Filter correspondences based on the mask
+    filtered_original_x = []
+    filtered_original_y = []
+    filtered_transformed_x = []
+    filtered_transformed_y = []
+
+    for ox, oy, tx, ty in zip(original_positions_x, original_positions_y, transformed_positions_x, transformed_positions_y):
+        if target_mask_cleaned[ty, tx] == 255:  # if the original point lies within the mask
+            filtered_original_x.append(ox)
+            filtered_original_y.append(oy)
+            filtered_transformed_x.append(tx)
+            filtered_transformed_y.append(ty)
+
+    original_positions_x, original_positions_y, transformed_positions_x, transformed_positions_y = np.array(filtered_original_x), np.array(filtered_original_y), np.array(filtered_transformed_x), np.array(filtered_transformed_y)
+
+    # correspondences = np.stack((original_positions_x, original_positions_y, transformed_positions_x, transformed_positions_y), axis=-1)
+    correspondences = pack_correspondences(
+        torch.from_numpy(original_positions_x),
+        torch.from_numpy(original_positions_y),
+        torch.from_numpy(transformed_positions_x),
+        torch.from_numpy(transformed_positions_y))
+
+    return correspondences, rendered_depth
+
+    # return lap_inpainted_depth_map, correspondences
+
+def get_correspondences1(depth_orig, depth_new, mask_orig, mask_new, intrinsics):
+
+    pts_orig = depth_to_world_coords(depth_orig, intrinsics=intrinsics)
+    H, W = depth_orig.shape[-2:]
+
+    pts_orig = pts_orig.reshape(-1, 3)
+    mask_orig_flat = mask_orig.reshape(-1).bool()
+
+    # original pixel coords
+    orig_ids = torch.nonzero(mask_orig_flat).squeeze(-1)
+    orig_y = orig_ids // W
+    orig_x = orig_ids % W
+
+    # take only original fg points
+    pts_orig_fg = pts_orig[mask_orig_flat]      # N x 3
+
+    # project ORIGINAL fg points into NEW scene
+    _, _, new_x, new_y, visible_mask = points_to_depth(
+        points=pts_orig_fg,
+        intrinsics=intrinsics,
+        output_size=(H, W),
+        point_mask=torch.ones(len(pts_orig_fg))
+    )
+
+    # now visible_mask aligns with orig_fg indexing
+    orig_x_vis = orig_x[visible_mask]
+    orig_y_vis = orig_y[visible_mask]
+
+    corr = torch.stack([orig_x_vis, orig_y_vis, new_x, new_y], dim=1)
+
+    print("Correspondences:", corr)
+
+    import sys
+    sys.exit()
+    return
+
+def get_correspondences(
+    depth_new: torch.Tensor, depth_orig: torch.Tensor, fg_mask: torch.Tensor, mask_new: torch.Tensor, intrinsics: torch.Tensor
+):
+    """
+    Computes pixel correspondences assuming the foreground object (depth_orig) 
+    has NOT been transformed, only placed/composited into the new scene (depth_new).
+
+    It finds which foreground pixels from depth_orig are visible in the new scene.
+    """
+    if not fg_mask.any():
+        return pack_correspondences(
+            torch.tensor([], dtype=torch.int64), torch.tensor([], dtype=torch.int64),
+            torch.tensor([], dtype=torch.int64), torch.tensor([], dtype=torch.int64),
+        )
+
+    device = fg_mask.device
+    img_res = fg_mask.shape[-1]
+    
+    # 1. Get 3D World Coordinates for the Original Foreground
+    # We use depth_orig to get the 3D position of the foreground points.
+    pts = depth_to_world_coords(depth_orig, intrinsics=intrinsics)
+
+    # 2. Select ONLY the Foreground Points
+    fg_mask_flat = fg_mask[0, 0].flatten().bool()
+    
+    # Indices of the foreground points in the flattened array (the original coordinates)
+    modded_id_list = torch.where(fg_mask_flat)[0].cpu().numpy()
+    
+    # Original 2D coordinates (Y, X) for the foreground points
+    original_coords = np.stack([modded_id_list // img_res, modded_id_list % img_res], axis=-1)
+    
+    # Select the 3D points corresponding to the foreground mask
+    transformed_fg_pts = pts.reshape(-1, 3)[fg_mask_flat].to(dtype=torch.float32)
+
+    num_fg_pts = len(transformed_fg_pts)
+    fg_point_mask = torch.ones(num_fg_pts, dtype=torch.uint8, device=device)
+    
+    # 3. Reproject Points to New Image Plane with Z-buffering
+    # This step simulates the rendering of the original foreground points *on top of*
+    # the existing scene and checks for visibility (occlusion by depth_new is implicit 
+    # in points_to_depth if it takes background points, but here it only checks self-occlusion 
+    # and projection). **Crucially, points_to_depth must be modified or designed to 
+    # incorporate the 'depth_new' map for correct occlusion checks.**
+    
+    # Since the original code's 'points_to_depth' logic only handles self-occlusion within 
+    # the input point cloud, we must assume that for this simplified version:
+    # (depth_new, mask_new) represents the final state, and we are mapping from (depth_orig, fg_mask)
+    # to the new image plane coordinates.
+    
+    # We use the (untransformed) foreground points.
+    (_, _, transformed_positions_x, transformed_positions_y, masked_point_visible_mask) = points_to_depth(
+        points=transformed_fg_pts,
+        intrinsics=intrinsics,
+        output_size=(img_res, img_res),
+        point_mask=fg_point_mask, # All points are 'modified' in this context
+    )
+
+    # 4. Filter for Visibility and Final Mask
+    visible_original_coords = original_coords[masked_point_visible_mask]
+    original_positions_y = visible_original_coords[:, 0]
+    original_positions_x = visible_original_coords[:, 1]
+    
+    # Target mask cleanup (same as before)
+    mask_new_np = (mask_new[0, 0].cpu().numpy() * 255).astype(np.uint8)
+    # Morphological operations (using cv2, as per original code)
+    open_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (img_res // 250, img_res // 250))
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (img_res // 50, img_res // 50))
+    target_mask_cleaned = cv2.morphologyEx(mask_new_np, cv2.MORPH_CLOSE, kernel)
+    target_mask_cleaned = cv2.morphologyEx(target_mask_cleaned, cv2.MORPH_OPEN, open_kernel)
+
+    # Filter correspondences based on the cleaned mask
+    filtered_original_x, filtered_original_y = [], []
+    filtered_transformed_x, filtered_transformed_y = [], []
+
+    for ox, oy, tx, ty in zip(original_positions_x, original_positions_y, transformed_positions_x, transformed_positions_y):
+        if target_mask_cleaned[ty, tx] == 255:
+            filtered_original_x.append(ox.item())
+            filtered_original_y.append(oy.item())
+            filtered_transformed_x.append(tx.item())
+            filtered_transformed_y.append(ty.item())
+
+    # 5. Pack and Return
+    print(pack_correspondences(
+        torch.from_numpy(np.array(filtered_original_x)),
+        torch.from_numpy(np.array(filtered_original_y)),
+        torch.from_numpy(np.array(filtered_transformed_x)),
+        torch.from_numpy(np.array(filtered_transformed_y))
+    ))
+
+    return 
+
 # def transform_point_cloud2(points, axis, angle_degrees, x, y, z):
 #     """
 #     Rotate point cloud around the centroid of points selected by the mask.
@@ -640,25 +919,29 @@ def depth_to_world_coords(depth: torch.Tensor, intrinsics: torch.Tensor, extrins
 
     return points[:, :, :, :3, 0][0]
 
-def points_to_depth(points: torch.Tensor, intrinsics: torch.Tensor, output_size: Tuple[int, int], extrinsics_R: torch.Tensor = None, extrinsics_t: torch.Tensor = None, point_mask: torch.Tensor = None):
+def points_to_depth(points: torch.Tensor, intrinsics: torch.Tensor, output_size: Tuple[int, int],
+                    extrinsics_R: torch.Tensor = None, extrinsics_t: torch.Tensor = None,
+                    point_mask: torch.Tensor = None):
     """
     input points are expected to be in camera coordinate frame
     """
-    
     device = points.device
-    
+
     points = points.cpu().numpy()
     intrinsics = intrinsics.cpu().numpy()
+
     if extrinsics_R is None:
         extrinsics_R = np.eye(3)
     else:
         extrinsics_R = extrinsics_R.cpu().numpy()
+
     if extrinsics_t is None:
         extrinsics_t = np.zeros(3)
     else:
         extrinsics_t = extrinsics_t.cpu().numpy()
+
     if point_mask is None:
-        point_mask = np.zeros(len(points), dtype = np.uint8)
+        point_mask = np.zeros(len(points), dtype=np.uint8)
     else:
         point_mask = point_mask.cpu().numpy()
 
@@ -673,31 +956,42 @@ def points_to_depth(points: torch.Tensor, intrinsics: torch.Tensor, output_size:
     M_inv[1, 1] = -1.0
     points = (M_inv @ points.T).T
 
-    # projection to image plane
+    # ---------- Filtering (KEEP MASK IN SYNC) ----------
+    valid = points[:, 2] > 1e-6
+    points = points[valid]
+    point_mask = point_mask[valid]          # <-- CRITICAL
+    # -----------------------------------------------
+
     projected = (intrinsics @ points.T).T
+    z = projected[:, 2]
+
+    valid = z > 1e-6
+    projected = projected[valid]
+    points = points[valid]
+    point_mask = point_mask[valid]          # <-- CRITICAL
+
     u = projected[:, 0] / projected[:, 2]
     v = projected[:, 1] / projected[:, 2]
 
     # image plane coordinates [-1, 1]^2 -> [0, max(output_size)-1]^2
-    # (assuming the fov is for the larger image dimension)
-    u = (u*0.5+0.5) * (max(output_size)-1)
-    v = (v*0.5+0.5) * (max(output_size)-1)
+    u = (u * 0.5 + 0.5) * (max(output_size) - 1)
+    v = (v * 0.5 + 0.5) * (max(output_size) - 1)
 
     u = np.around(np.clip(u, 0, output_size[1] - 1)).astype(int)
     v = np.around(np.clip(v, 0, output_size[0] - 1)).astype(int)
 
     depth_map = np.full(output_size, np.inf)
-    # dist_to_cam = np.full(output_size, np.inf)
     depth_mask = np.full(output_size, False)
     modified_depth_mask = np.full(output_size, False)
-    masked_point_visible_mask = np.full_like(point_mask, False)
+
+    # IMPORTANT: this mask must be SAME LENGTH as filtered points/u/v
+    masked_point_visible_mask = np.full(points.shape[0], False, dtype=bool)
+
     depth_set_by = np.full(output_size, -1, dtype=np.int64)
 
-    # depth buffer
     for i in range(points.shape[0]):
         if points[i, 2] < depth_map[v[i], u[i]]:
             depth_map[v[i], u[i]] = points[i, 2]
-            # dist_to_cam[v[i], u[i]] = (points[i,0] ** 2 + points[i, 1]**2 + points[i, 2]**2)**0.5
             if point_mask[i]:
                 masked_point_visible_mask[i] = True
                 if depth_set_by[v[i], u[i]] >= 0:
@@ -710,37 +1004,6 @@ def points_to_depth(points: torch.Tensor, intrinsics: torch.Tensor, output_size:
                 if depth_set_by[v[i], u[i]] >= 0:
                     masked_point_visible_mask[depth_set_by[v[i], u[i]]] = False
                 depth_set_by[v[i], u[i]] = i
-
-    masked_point_visible_mask = masked_point_visible_mask.astype(bool)
-
-    # mask_no_points = depth_map == max_depth_value
-    # pixels_no_points = np.column_stack(np.where(mask_no_points))
-
-    # far_inv_depth = 0.03 # inverse depth at far plane (empiricaly ~ similar to MiDaS depth ranges)
-    # near_inv_depth = 100.0 # inverse depth at near plane (empiricaly ~ similar to MiDaS depth ranges)
-
-    # #smoothed_dist_to_cam = cv2.medianBlur(dist_to_cam.astype(np.float32), ksize=3)
-    # #dist_to_cam[dist_to_cam == np.inf] = smoothed_dist_to_cam[dist_to_cam == np.inf]
-
-    # near_depth = dist_to_cam.min()
-    # far_depth = dist_to_cam.max()
-
-    # dist_to_cam = 1.0 / dist_to_cam
-    # dist_to_cam = (dist_to_cam - 1/far_depth) / ((1/near_depth) - (1/far_depth))
-    # dist_to_cam = dist_to_cam * (near_inv_depth - far_inv_depth) + far_inv_depth
-
-    # #dist_to_cam = cv2.medianBlur(dist_to_cam.astype(np.float32), ksize = 1)
-    
-    # # depth to disparity
-    # depth_map = 1.0 / depth_map
-
-    #depth_map[depth_map == np.inf] = 1e-8
-    #depth_map[depth_map == 0] = 1e-8
-
-    #smoothed_depth_map = cv2.medianBlur(depth_map.astype(np.float32), ksize=3)
-    #depth_map[depth_map < 1e-8] = smoothed_depth_map[depth_map < 1e-8]
-    #smoothed_depth_map = depth_map #cv2.medianBlur(depth_map.astype(np.float32), ksize=1)
-    # depth_image = Image.fromarray(depth_map_normalized.astype(np.uint8))
 
     depth_map = torch.from_numpy(depth_map)[None, None, ...].to(device=device, dtype=torch.float32)
 

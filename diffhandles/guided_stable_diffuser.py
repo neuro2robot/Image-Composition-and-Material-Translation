@@ -2,7 +2,7 @@ import math
 import inspect
 from typing import List
 from packaging import version
-
+import os
 import torch
 import numpy as np
 from transformers import CLIPTextModel, CLIPTokenizer
@@ -13,18 +13,20 @@ from diffusers.utils import deprecate
 from diffusers.utils.torch_utils import randn_tensor
 from tqdm import tqdm
 import scipy.ndimage
-
+from PIL import Image
 from diffhandles.model.unet_2d_condition import UNet2DConditionModel # this is the custom UNet that can also return intermediate activations and attentions
 from diffhandles.guided_diffuser import GuidedDiffuser
 from diffhandles.utils import normalize_attn_torch, unpack_correspondences
-from diffhandles.losses import compute_foreground_loss, compute_background_loss
+from diffhandles.losses import compute_foreground_loss, compute_background_loss, compute_latent_loss, compute_background_latent_loss
+import time
+from torchvision.utils import save_image
 
 class GuidedStableDiffuser(GuidedDiffuser):
     def __init__(self, conf):
         super().__init__(conf=conf)
 
         if self.conf.use_depth:
-            model_name = "stabilityai/stable-diffusion-2-depth"
+            model_name = "sd2-community/stable-diffusion-2-depth"
         else:       
             model_name = "stabilityai/stable-diffusion-2-1"
 
@@ -44,7 +46,7 @@ class GuidedStableDiffuser(GuidedDiffuser):
         is_unet_sample_size_less_64 = hasattr(self.unet.config, "sample_size") and self.unet.config.sample_size < 64
         is_stable_diffusion_2_depth = (
             hasattr(self.unet.config, "_name_or_path")
-            and self.unet.config._name_or_path == "stabilityai/stable-diffusion-2-depth"
+            and self.unet.config._name_or_path == "sd2-community/stable-diffusion-2-depth"
         )
         if (is_unet_version_less_0_9_0 and is_unet_sample_size_less_64) or is_stable_diffusion_2_depth:
             deprecation_message = (
@@ -205,7 +207,7 @@ class GuidedStableDiffuser(GuidedDiffuser):
         activation_list = [] 
         activation2_list = []
         activation3_list = []
-
+        latents_list=[]
         latents = init_latents
         
         # obj_number = 2
@@ -238,7 +240,7 @@ class GuidedStableDiffuser(GuidedDiffuser):
                 activation_list.append(activations[0])
                 activation2_list.append(activations2[0])
                 activation3_list.append(activations3[0])
-                            
+                latents_list.append(latents)
                 latent_model_input = torch.cat([latents]*2) #if do_classifier_free_guidance else latents
                 latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
                 if self.conf.use_depth:
@@ -261,10 +263,14 @@ class GuidedStableDiffuser(GuidedDiffuser):
                 # perform guidance
                 #if do_classifier_free_guidance:
                 noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+
+                ##################### ###################### ##################### ###################### ##############
                 noise_pred = noise_pred_uncond + 7.5 * (noise_pred_text - noise_pred_uncond)
+                ##################### ###################### ##################### ###################### ##############
 
                 # compute the previous noisy sample x_t -> x_t-1
-                latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs, return_dict=False)[0]     
+                latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs, return_dict=False)[0]  
+
                 torch.cuda.empty_cache()
         
         activations = [
@@ -272,7 +278,7 @@ class GuidedStableDiffuser(GuidedDiffuser):
             torch.stack(activation2_list, dim=0),
             torch.stack(activation3_list, dim=0)]
         
-        return activations, latents, uncond_embeddings, init_latents
+        return activations, latents, uncond_embeddings, init_latents, latents_list
 
     def encode_latent_image(self, image: torch.Tensor) -> torch.Tensor:
         # image = VaeImageProcessor(vae_scale_factor=self.vae.config.scaling_factor).preprocess(image, output_type="pt")
@@ -300,20 +306,34 @@ class GuidedStableDiffuser(GuidedDiffuser):
         if bg_weight is None:
             bg_weight = self.conf.bg_weight
 
+        print("fg weight:", fg_weight)
+        print("bg weight:", bg_weight)
+
         with torch.no_grad():
         
             generator = torch.manual_seed(self.conf.seed)
 
             #Set timesteps
+            print("num timesteps:", self.conf.num_timesteps)
             self.scheduler.set_timesteps(self.conf.num_timesteps, device=self.device)
             timesteps, num_inference_steps = self.get_timesteps(self.conf.num_timesteps, strength)
-            
+            print("num timesteps:", timesteps)
+            print("num inference steps:", num_inference_steps)
+
             processed_correspondences = self.process_correspondences(correspondences, img_res=depth.shape[-1], bg_erosion=self.conf.bg_erosion)
-            
+            for key, value in processed_correspondences.items():
+                print(f"{key}: {len(value)},asdflasdfljhsdaflkdasfhsdlafhsdalfjhsdaflkjhsdafjsdafhl")            
+            # for key, value in processed_correspondences.items():
+            #     if hasattr(value, "shape"):  # works for np.ndarray and torch.Tensor
+            #         print(f"{key}: shape={value.shape}, dtype={value.dtype}")
+            #     else:
+            #         print(f"{key}: type={type(value)}, value={value}")
+            # self.conf.use_depth = False
             if self.conf.use_depth:
                 depth = self.init_depth(depth)
             
             # Encode Prompt
+            print("Prompt:", prompt)
             input_ids = self.tokenizer(
                     [prompt],
                     padding="max_length",
@@ -431,7 +451,10 @@ class GuidedStableDiffuser(GuidedDiffuser):
                     grad_cond = 0
                 else:
                     grad_cond = torch.autograd.grad(loss.requires_grad_(True), [latents])[0]
-                latents = latents - grad_cond * 0.1
+
+                ##################### ###################### ##################### ###################### ##############
+                latents = latents - grad_cond * 0.15
+                ##################### ###################### ##################### ###################### ##############
 
                 # if loss != 0:
                 #     opt.zero_grad()
@@ -468,8 +491,488 @@ class GuidedStableDiffuser(GuidedDiffuser):
                 noise_pred = unet_output[0]
                 
                 noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-                noise_pred = noise_pred_uncond + 7.5 * (noise_pred_text - noise_pred_uncond)
 
+                ##################### ###################### ##################### ###################### ##############
+                noise_pred = noise_pred_uncond + 7.5 * (noise_pred_text - noise_pred_uncond)
+                ##################### ###################### ##################### ###################### ##############
+
+                # compute the previous noisy sample x_t -> x_t-1
+                latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs, return_dict=False)[0]
+                torch.cuda.empty_cache()
+
+                if save_denoising_steps:
+                    image = self.decode_latent_image(latents.detach())
+                    denoising_steps['opt'][-1].append(image.cpu())
+                    
+        with torch.no_grad():
+            image = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False)[0]
+            image = VaeImageProcessor(vae_scale_factor=self.vae.config.scaling_factor).postprocess(image, output_type="pt")
+        
+        if save_denoising_steps:
+            return image, denoising_steps
+        else:
+            return image
+        
+    def guided_inference_composite1(
+            self,
+            bg_latents_init: torch.Tensor,
+            fg_latents: list[torch.Tensor], bg_latents: list[torch.Tensor],
+            depth: torch.Tensor, fg_mask_latents: torch.Tensor, composite_mask_latents: torch.Tensor,
+            fg_uncond_embeddings: torch.Tensor, bg_uncond_embeddings: torch.Tensor, 
+            fg_prompt: str, bg_prompt: str, composite_prompt: str,
+            fg_activations: list[torch.Tensor], bg_activations: list[torch.Tensor],
+            correspondences: torch.Tensor, fg_weight: float = None, bg_weight: float = None, save_denoising_steps: bool = False):
+        
+        strength = 1.0
+
+        if fg_weight is None:
+            fg_weight = self.conf.fg_weight
+        if bg_weight is None:
+            bg_weight = self.conf.bg_weight
+
+        with torch.no_grad():
+        
+            generator = torch.manual_seed(self.conf.seed)
+
+            #Set timesteps
+            self.scheduler.set_timesteps(self.conf.num_timesteps, device=self.device)
+            timesteps, num_inference_steps = self.get_timesteps(self.conf.num_timesteps, strength)
+            print("num inference steps:", num_inference_steps)
+            print ("Shape of depth:", depth.shape)
+            processed_correspondences = self.process_correspondences(correspondences, img_res=depth.shape[-1], bg_erosion=self.conf.bg_erosion)
+
+            for key, value in processed_correspondences.items():
+                print(f"{key}: {value}")            
+            H, W = 512, 512
+            tx = processed_correspondences["transformed_x"]
+            ty = processed_correspondences["transformed_y"]
+            bx = processed_correspondences["background_x_orig"]
+            by = processed_correspondences["background_y_orig"]
+
+            # Safety: clip coordinates to image bounds
+            tx = np.clip(tx, 0, W - 1)
+            ty = np.clip(ty, 0, H - 1)
+            bx = np.clip(bx, 0, W - 1)
+            by = np.clip(by, 0, H - 1)
+
+            # Create two separate masks
+            mask_transformed = np.zeros((H, W), dtype=np.uint8)
+            mask_background = np.zeros((H, W), dtype=np.uint8)
+
+            # Fill each mask
+            mask_transformed[ty, tx] = 255
+            mask_background[by, bx] = 255
+
+            save_dir = "/diffusion/DiffusionHandles/custom_scripts/data/results/screw"
+            os.makedirs(save_dir, exist_ok=True)  # Create directory if not exists
+            print("Saving masks to:", save_dir)
+            Image.fromarray(mask_transformed).save(os.path.join(save_dir, "mask_transformed.png"))
+            Image.fromarray(mask_background).save(os.path.join(save_dir, "mask_background.png"))
+            # time.sleep(1000)
+            if self.conf.use_depth:
+                # resize depth from 512x512 to 64x64
+                depth = self.init_depth(depth)
+            
+            # Encode Prompt
+            print("Prompt:", composite_prompt)
+            input_ids = self.tokenizer(
+                    [composite_prompt],
+                    padding="max_length",
+                    truncation=True,
+                    max_length=self.tokenizer.model_max_length,
+                    return_tensors="pt",
+                )    
+
+            cond_embeddings = self.text_encoder(input_ids.input_ids.to(self.device))[0]
+            print("Encoded Prompt Shape:", cond_embeddings.shape)
+
+            extra_step_kwargs = self.prepare_extra_step_kwargs(generator, 0.0)
+
+            if save_denoising_steps:
+                denoising_steps = {
+                    'opt': [],
+                    'post-opt': [],
+                }
+            
+            # create guidance weight schedule
+            fg_weight *= 30
+            bg_weight *= 30
+            denoising_weight_schedule = []
+            if self.conf.guidance_schedule_type == "constant":
+                fg_weight_falloff = np.linspace(fg_weight, fg_weight, self.conf.guidance_max_step)
+                bg_weight_falloff = np.linspace(bg_weight, bg_weight, self.conf.guidance_max_step)
+            elif self.conf.guidance_schedule_type == "linear":
+                fg_weight_falloff = np.linspace(fg_weight, 0.0, self.conf.guidance_max_step)
+                bg_weight_falloff = np.linspace(bg_weight, 0.0, self.conf.guidance_max_step)
+            elif self.conf.guidance_schedule_type == "quadratic":
+                fg_weight_falloff = np.linspace(np.sqrt(fg_weight), 0.0, self.conf.guidance_max_step)**2
+                bg_weight_falloff = np.linspace(np.sqrt(bg_weight), 0.0, self.conf.guidance_max_step)**2
+            else:
+                raise ValueError(f"Unknown guidance schedule type: {self.conf.guidance_schedule_type}")
+            for t_idx in range(self.conf.guidance_max_step):
+                if t_idx % 3 == 0:
+                    fg_weights = [0.0, 0.0, 7.5]
+                    bg_weights = [0.0, 0.0, 1.5]
+                elif t_idx % 3 == 1:
+                    fg_weights = [0.0, 5.0, 0.0]
+                    bg_weights = [0.0, 1.5, 0.0]
+                elif t_idx % 3 == 2:
+                    fg_weights = [0.0, 5.0, 7.5]
+                    bg_weights = [0.0, 1.5, 1.5]
+                denoising_weight_schedule.append((
+                    t_idx,
+                    (np.array(fg_weights)*fg_weight_falloff[t_idx]).tolist(),
+                    (np.array(bg_weights)*bg_weight_falloff[t_idx]).tolist()))
+            denoising_weight_schedule.append((self.conf.guidance_max_step, [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]))
+            optimization_weight_schedule = [
+                (0, [2.5, 2.5, 2.5], [1.25, 1.25, 1.25]),
+                (1, [1.25, 1.25, 1.25], [2.5, 2.5, 2.5]),
+                (2, [1.25, 1.25, 1.25], [1.25, 1.25, 1.25]),
+                (3, [2.5, 2.5, 2.5], [2.5, 2.5, 2.5]),
+            ]
+            guidance_weight_schedule = StepGuidanceWeightSchedule(
+                denoising_steps=denoising_weight_schedule,
+                optimization_steps=optimization_weight_schedule)
+        
+        # latents = latents.requires_grad_(True)
+
+        latents = bg_latents_init
+        print("Bg latents shape:", len(bg_latents))
+        print("Fg latents shape:", len(fg_latents))
+        print("Fg Mask latents shape:", fg_mask_latents.shape)
+        print("Composite Mask latents shape:", composite_mask_latents.shape)
+        print("Latents shape:", latents.shape)
+
+        for t_idx, t in enumerate(tqdm(timesteps)):
+            torch.set_grad_enabled(True)
+            # with torch.enable_grad():
+            latents = latents.requires_grad_(True)
+
+            # 64 x 64
+            activations_size = (bg_activations[2][t_idx].shape[-2], bg_activations[2][t_idx].shape[-1])
+
+            if save_denoising_steps:
+                denoising_steps['opt'].append([])
+                        
+            # opt = torch.optim.Adam(params=[latents], lr=0.01)
+            # opt = torch.optim.SGD(params=[latents], lr=0.1)
+
+            iteration = 0
+            while iteration < self.conf.num_optsteps and t_idx < self.conf.guidance_max_step:
+                # latents = bg_latents
+                latent_model_input = latents
+
+                latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
+                if self.conf.use_depth:
+                    latent_model_input = torch.cat([latent_model_input, depth], dim=1)
+                    # print("Optimization: Latent Input Shape", latent_model_input.shape)
+
+                                
+                # predict the noise residual
+                unet_output = self.unet(
+                    latent_model_input,
+                    t,
+                    encoder_hidden_states=cond_embeddings,
+                    cross_attention_kwargs=None,
+                    return_dict=False,
+                )
+
+                noise_pred = unet_output[0]
+                activations = [unet_output[4], unet_output[5], unet_output[6]]
+
+                fgw, bgw = guidance_weight_schedule(t_idx, iteration)
+
+                loss = 0.0
+                for act_idx in range(len(bg_activations)):
+                    if fgw != 0.0:
+                        loss += fgw[act_idx] * compute_foreground_loss(
+                            activations=activations[act_idx][0], activations_orig=fg_activations[act_idx][t_idx],
+                            processed_correspondences=processed_correspondences,
+                            patch_size=self.conf.fg_patch_size, activations_size=activations_size)
+                    if bgw != 0.0:
+                        loss += bgw[act_idx] * compute_background_loss(
+                            activations=activations[act_idx][0], activations_orig=bg_activations[act_idx][t_idx],
+                            processed_correspondences=processed_correspondences,
+                            patch_size=self.conf.bg_patch_size, activations_size=activations_size, loss_type=self.conf.bg_loss_type)
+                  
+                fg_latent_loss, bg_latent_loss = compute_latent_loss(fg_mask_latents, composite_mask_latents, fg_latents[t_idx], bg_latents[t_idx], latents)
+                
+                loss = 0 * loss + 3 * fg_latent_loss + 0 * bg_latent_loss
+                
+                if(loss == 0):
+                    grad_cond = 0
+                else:
+                    grad_cond = torch.autograd.grad(loss.requires_grad_(True), [latents])[0]
+
+                ##################### ###################### ##################### ###################### ##############
+                # old_latents = latents
+                latents = latents - grad_cond * 0.15
+                ##################### ###################### ##################### ###################### ##############
+                
+                iteration += 1
+                # torch.cuda.empty_cache()
+
+            if save_denoising_steps:
+                with torch.no_grad():
+                    image = self.decode_latent_image(latents.detach())
+                    denoising_steps['opt'][-1].append(image.cpu())
+                
+            torch.set_grad_enabled(False)            
+            with torch.no_grad():
+
+                latent_model_input = torch.cat([latents] * 2) #if do_classifier_free_guidance else latents
+                latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
+                if self.conf.use_depth:
+                    latent_model_input = torch.cat([latent_model_input, torch.cat([depth]*2, dim=0)], dim=1)
+
+                text_embeddings = torch.cat([bg_uncond_embeddings[t_idx].expand(*cond_embeddings.shape), cond_embeddings])
+
+                # predict the noise residual
+                unet_output = self.unet(
+                    latent_model_input,
+                    t,
+                    encoder_hidden_states=text_embeddings,
+                    cross_attention_kwargs=None,
+                    return_dict=False,
+                )
+                    
+                noise_pred = unet_output[0]
+                
+                noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+
+                ##################### ###################### ##################### ###################### ##############
+                noise_pred = noise_pred_uncond + 7.5 * (noise_pred_text - noise_pred_uncond)
+                ##################### ###################### ##################### ###################### ##############
+
+                # compute the previous noisy sample x_t -> x_t-1
+                latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs, return_dict=False)[0]
+                torch.cuda.empty_cache()
+
+                if save_denoising_steps:
+                    image = self.decode_latent_image(latents.detach())
+                    denoising_steps['opt'][-1].append(image.cpu())
+                    
+        with torch.no_grad():
+            image = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False)[0]
+            image = VaeImageProcessor(vae_scale_factor=self.vae.config.scaling_factor).postprocess(image, output_type="pt")
+        
+        if save_denoising_steps:
+            return image, denoising_steps
+        else:
+            return image
+
+    def guided_inference_composite(
+            self,
+            bg_latents_init: torch.Tensor,
+            fg_latents: list[torch.Tensor], bg_latents: list[torch.Tensor],
+            depth: torch.Tensor, fg_mask_latents: torch.Tensor, composite_mask_latents: torch.Tensor,
+            fg_uncond_embeddings: torch.Tensor, bg_uncond_embeddings: torch.Tensor, 
+            fg_prompt: str, bg_prompt: str, composite_prompt: str,
+            fg_activations: list[torch.Tensor], bg_activations: list[torch.Tensor],
+            correspondences: torch.Tensor, fg_weight: float = None, bg_weight: float = None, save_denoising_steps: bool = False):
+        
+        strength = 1.0
+
+        if fg_weight is None:
+            fg_weight = self.conf.fg_weight
+        if bg_weight is None:
+            bg_weight = self.conf.bg_weight
+
+        with torch.no_grad():
+        
+            generator = torch.manual_seed(self.conf.seed)
+
+            #Set timesteps
+            self.scheduler.set_timesteps(self.conf.num_timesteps, device=self.device)
+            timesteps, num_inference_steps = self.get_timesteps(self.conf.num_timesteps, strength)
+            # print("num inference steps:", num_inference_steps)
+            # print ("Shape of depth:", depth.shape)
+            processed_correspondences = self.process_correspondences(correspondences, img_res=depth.shape[-1], bg_erosion=self.conf.bg_erosion)
+
+            if self.conf.use_depth:
+                depth = self.init_depth(depth)
+            
+            # Encode Prompt
+            print("Prompt:", composite_prompt)
+            input_ids = self.tokenizer(
+                    [composite_prompt],
+                    padding="max_length",
+                    truncation=True,
+                    max_length=self.tokenizer.model_max_length,
+                    return_tensors="pt",
+                )    
+
+            cond_embeddings = self.text_encoder(input_ids.input_ids.to(self.device))[0]
+            print("Encoded Prompt Shape:", cond_embeddings.shape)
+
+            extra_step_kwargs = self.prepare_extra_step_kwargs(generator, 0.0)
+
+            if save_denoising_steps:
+                denoising_steps = {
+                    'opt': [],
+                    'post-opt': [],
+                }
+            
+            # create guidance weight schedule
+            fg_weight *= 30
+            bg_weight *= 30
+            denoising_weight_schedule = []
+            if self.conf.guidance_schedule_type == "constant":
+                fg_weight_falloff = np.linspace(fg_weight, fg_weight, self.conf.guidance_max_step)
+                bg_weight_falloff = np.linspace(bg_weight, bg_weight, self.conf.guidance_max_step)
+            elif self.conf.guidance_schedule_type == "linear":
+                fg_weight_falloff = np.linspace(fg_weight, 0.0, self.conf.guidance_max_step)
+                bg_weight_falloff = np.linspace(bg_weight, 0.0, self.conf.guidance_max_step)
+            elif self.conf.guidance_schedule_type == "quadratic":
+                fg_weight_falloff = np.linspace(np.sqrt(fg_weight), 0.0, self.conf.guidance_max_step)**2
+                bg_weight_falloff = np.linspace(np.sqrt(bg_weight), 0.0, self.conf.guidance_max_step)**2
+            else:
+                raise ValueError(f"Unknown guidance schedule type: {self.conf.guidance_schedule_type}")
+            for t_idx in range(self.conf.guidance_max_step):
+                if t_idx % 3 == 0:
+                    fg_weights = [0.0, 0.0, 7.5]
+                    bg_weights = [0.0, 0.0, 1.5]
+                elif t_idx % 3 == 1:
+                    fg_weights = [0.0, 5.0, 0.0]
+                    bg_weights = [0.0, 1.5, 0.0]
+                elif t_idx % 3 == 2:
+                    fg_weights = [0.0, 5.0, 7.5]
+                    bg_weights = [0.0, 1.5, 1.5]
+                denoising_weight_schedule.append((
+                    t_idx,
+                    (np.array(fg_weights)*fg_weight_falloff[t_idx]).tolist(),
+                    (np.array(bg_weights)*bg_weight_falloff[t_idx]).tolist()))
+            denoising_weight_schedule.append((self.conf.guidance_max_step, [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]))
+            optimization_weight_schedule = [
+                (0, [2.5, 2.5, 2.5], [1.25, 1.25, 1.25]),
+                (1, [1.25, 1.25, 1.25], [2.5, 2.5, 2.5]),
+                (2, [1.25, 1.25, 1.25], [1.25, 1.25, 1.25]),
+                (3, [2.5, 2.5, 2.5], [2.5, 2.5, 2.5]),
+            ]
+            guidance_weight_schedule = StepGuidanceWeightSchedule(
+                denoising_steps=denoising_weight_schedule,
+                optimization_steps=optimization_weight_schedule)
+        
+        # latents = latents.requires_grad_(True)
+
+        latents = bg_latents_init #+
+        
+        print("Bg latents shape:", len(bg_latents))
+        print("Fg latents shape:", len(fg_latents))
+        print("Fg Mask latents shape:", fg_mask_latents.shape)
+        print("Composite Mask latents shape:", composite_mask_latents.shape)
+        print("Latents shape:", latents.shape)
+        print("Activation Loss Weight:", self.conf.activation_loss_weight)
+        print("Fg Latent Loss Weight:", self.conf.fg_latent_loss_weight)
+        print("Bg Latent Loss Weight:", self.conf.bg_latent_loss_weight)
+        # print("This is working  correctly up to here")
+
+        for t_idx, t in enumerate(tqdm(timesteps)):
+            torch.set_grad_enabled(True)
+            # with torch.enable_grad():
+            latents = latents.requires_grad_(True)
+
+            # 64 x 64
+            activations_size = (bg_activations[2][t_idx].shape[-2], bg_activations[2][t_idx].shape[-1])
+
+            if save_denoising_steps:
+                denoising_steps['opt'].append([])
+                        
+            # opt = torch.optim.Adam(params=[latents], lr=0.01)
+            # opt = torch.optim.SGD(params=[latents], lr=0.1)
+
+            iteration = 0
+            while iteration < self.conf.num_optsteps and t_idx < self.conf.guidance_max_step:
+                # latents = bg_latents
+                latent_model_input = latents
+
+                latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
+                if self.conf.use_depth:
+                    latent_model_input = torch.cat([latent_model_input, depth], dim=1)
+                    # print("Optimization: Latent Input Shape", latent_model_input.shape)
+
+                                
+                # predict the noise residual
+                unet_output = self.unet(
+                    latent_model_input,
+                    t,
+                    encoder_hidden_states=cond_embeddings,
+                    cross_attention_kwargs=None,
+                    return_dict=False,
+                )          
+                
+                noise_pred = unet_output[0] # torch.Size([1, 4, 64, 64])
+                activations = [unet_output[4], unet_output[5], unet_output[6]] 
+                # 4: torch.Size([1, 1280, 32, 32]),
+                # 5: torch.Size([1, 640, 64, 64]), 
+                # 6: torch.Size([1, 320, 64, 64])
+
+                fgw, bgw = guidance_weight_schedule(t_idx, iteration)
+
+                loss = 0.0
+                for act_idx in range(len(bg_activations)):
+                    if fgw != 0.0:
+                        loss += fgw[act_idx] * compute_foreground_loss(
+                            activations=activations[act_idx][0], activations_orig=fg_activations[act_idx][t_idx],
+                            processed_correspondences=processed_correspondences,
+                            patch_size=self.conf.fg_patch_size, activations_size=activations_size)
+                    if bgw != 0.0:
+                        loss += bgw[act_idx] * compute_background_loss(
+                            activations=activations[act_idx][0], activations_orig=bg_activations[act_idx][t_idx],
+                            processed_correspondences=processed_correspondences,
+                            patch_size=self.conf.bg_patch_size, activations_size=activations_size, loss_type=self.conf.bg_loss_type)
+                
+                fg_latent_loss, bg_latent_loss = compute_latent_loss(fg_mask_latents, composite_mask_latents, fg_latents[t_idx], bg_latents[t_idx], latents)
+
+                # bg_latent_loss = compute_background_latent_loss(
+                #             bg_latent=bg_latents[t_idx][0], current_latent=latents[0],
+                #             processed_correspondences=processed_correspondences, latents_size=activations_size)
+
+                loss = self.conf.activation_loss_weight * loss + self.conf.bg_latent_loss_weight * bg_latent_loss + self.conf.fg_latent_loss_weight * fg_latent_loss
+
+                if(loss == 0):
+                    grad_cond = 0
+                else:
+                    grad_cond = torch.autograd.grad(loss.requires_grad_(True), [latents])[0]
+
+                ##################### ###################### ##################### ###################### ##############
+                # old_latents = latents
+                latents = latents - grad_cond * 0.15
+                ##################### ###################### ##################### ###################### ##############
+                
+                iteration += 1
+                # torch.cuda.empty_cache()
+
+            if save_denoising_steps:
+                with torch.no_grad():
+                    image = self.decode_latent_image(latents.detach())
+                    denoising_steps['opt'][-1].append(image.cpu())
+                
+            torch.set_grad_enabled(False)            
+            with torch.no_grad():
+
+                latent_model_input = torch.cat([latents] * 2) #if do_classifier_free_guidance else latents
+                latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
+                if self.conf.use_depth:
+                    latent_model_input = torch.cat([latent_model_input, torch.cat([depth]*2, dim=0)], dim=1)
+
+                text_embeddings = torch.cat([bg_uncond_embeddings[t_idx].expand(*cond_embeddings.shape), cond_embeddings])
+
+                # predict the noise residual
+                unet_output = self.unet(
+                    latent_model_input,
+                    t,
+                    encoder_hidden_states=text_embeddings,
+                    cross_attention_kwargs=None,
+                    return_dict=False,
+                )
+                    
+                noise_pred = unet_output[0]
+                noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+
+                ##################### ###################### ##################### ###################### ##############
+                noise_pred = noise_pred_uncond + 7.5 * (noise_pred_text - noise_pred_uncond) # CFG
+                ##################### ###################### ##################### ###################### ##############
                 # compute the previous noisy sample x_t -> x_t-1
                 latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs, return_dict=False)[0]
                 torch.cuda.empty_cache()
@@ -490,6 +993,12 @@ class GuidedStableDiffuser(GuidedDiffuser):
     def process_correspondences(self, correspondences, img_res, bg_erosion=0):
 
         original_x, original_y, transformed_x, transformed_y = unpack_correspondences(correspondences)
+
+        print("Correspondences shape:", correspondences.shape)
+        print("Original X shape:", original_x.shape)
+        print("Original Y shape:", original_y.shape)
+        print("Transformed X shape:", transformed_x.shape)
+        print("Transformed Y shape:", transformed_y.shape)
 
         # Since np.split creates arrays of shape (N, 1), we'll squeeze them to get back to shape (N,)
         original_x = original_x.squeeze()

@@ -1,6 +1,26 @@
 import torch
 import cv2
 
+# The latent-based losses directly constrain the current diffusion latent to match the foreground latent 
+# inside the transformed object mask and the background latent outside it, so they mainly preserve the 
+# low-level image state, spatial composition, and background consistency. In contrast, the activation-based 
+# losses compare U-Net feature vectors at corresponding original and transformed locations—using local patch 
+# averages for the foreground and local or global averages for the background—so they preserve higher-level 
+# semantic properties such as object identity, shape, texture, and contextual appearance even when the object 
+# moves. Thus, latent loss keeps the generated image numerically close to the desired foreground/background 
+# latent composition, while activation loss keeps the edited result perceptually and semantically consistent 
+# with the original image.
+
+# def compute_latent_loss(fg_mask_latents: torch.Tensor, composite_mask_latents: torch.Tensor, fg_latent: torch.Tensor, bg_latent: torch.Tensor, current_latent: torch.Tensor):
+#     fg_loss = torch.norm(composite_mask_latents * (current_latent - fg_latent))
+#     bg_loss = torch.norm((1 - composite_mask_latents) * (current_latent - bg_latent))
+#     return fg_loss, bg_loss
+
+def compute_latent_loss(fg_mask_latents: torch.Tensor, composite_mask_latents: torch.Tensor, fg_latent: torch.Tensor, bg_latent: torch.Tensor, current_latent: torch.Tensor):
+    fg_loss = torch.norm(composite_mask_latents * current_latent - fg_mask_latents * fg_latent)
+    bg_loss = torch.norm((1 - composite_mask_latents) * (current_latent - bg_latent))
+    return fg_loss, bg_loss
+
 def compute_foreground_loss(
         activations, activations_orig, processed_correspondences,
         patch_size, activations_size):
@@ -36,6 +56,16 @@ def compute_background_loss(
             patch_size=patch_size)
     else:
         raise ValueError(f'Unknown background loss type: {loss_type}')
+
+    return loss
+
+def compute_background_latent_loss(
+        bg_latent, current_latent, processed_correspondences, latents_size):
+
+    loss = average_feat_l1_loss(
+            feat_map_1=bg_latent, feat_map_2=current_latent,
+            x1=processed_correspondences['background_x_orig'], y1=processed_correspondences['background_y_orig'],
+            x2=processed_correspondences['background_x_trans'], y2=processed_correspondences['background_y_trans'])
 
     return loss
 

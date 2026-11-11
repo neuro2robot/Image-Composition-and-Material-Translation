@@ -1,0 +1,2 @@
+pip install diffusers==0.10.1
+python main.py --harmonize_iterations 5 --save_dir "./output/dice_2_3" --is_single_image --image_path "./demo/dice_2_3/edit_000.png" --mask_path "./demo/dice_2_2/mask.png" --foreground_prompt "dice sunny" --background_prompt "dice dark" --pretrained_diffusion_path "stabilityai/stable-diffusion-2-base" --use_edge_map

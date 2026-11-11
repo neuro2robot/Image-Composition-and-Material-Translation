@@ -33,13 +33,15 @@ def estimate_depth(input_image_paths, output_paths, img_res=512):
 
 if __name__ == '__main__':
 
-    input_img_dir = 'data'
+    input_img_dir = '../custom_scripts/data/pin_1'
 
-    input_image_paths = glob.glob(f'{input_img_dir}/*/input.png', recursive=False)
-    bg_image_paths = glob.glob(f'{input_img_dir}/*/bg.png', recursive=False)
+    input_image_paths = glob.glob(f'{input_img_dir}/bg.png', recursive=False)
+    bg_image_paths = glob.glob(f'{input_img_dir}/fg.png', recursive=False)
+    composite_image_paths = glob.glob(f'{input_img_dir}/composite_blended.png', recursive=False)
     output_paths = [
-        os.path.join(os.path.dirname(path), 'depth.exr') for path in input_image_paths] + [
-        os.path.join(os.path.dirname(path), 'bg_depth.exr') for path in bg_image_paths]
-    input_image_paths = input_image_paths + bg_image_paths
+        os.path.join(os.path.dirname(path), 'bg_depth.exr') for path in input_image_paths] + [
+        os.path.join(os.path.dirname(path), 'fg_depth.exr') for path in bg_image_paths] + [
+        os.path.join(os.path.dirname(path), 'composite_depth.exr') for path in composite_image_paths]
+    input_image_paths = input_image_paths + bg_image_paths + composite_image_paths
 
     estimate_depth(input_image_paths=input_image_paths, output_paths=output_paths)

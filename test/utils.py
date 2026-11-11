@@ -2,6 +2,9 @@ import torch
 import torchvision
 import imageio.v3 as imageio
 import imageio.plugins as imageio_plugins
+import os
+import numpy as np
+from PIL import Image
 
 imageio_plugins.freeimage.download() # to load exr files
 
@@ -31,10 +34,17 @@ def save_image(img: torch.Tensor, path: str):
     imageio.imwrite(path, img.numpy())
     
 def load_depth(path: str) -> torch.Tensor:
-    # depth = Image.open(path)
-    # depth = torchvision.transforms.functional.pil_to_tensor(depth)[None,...]
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".exr":
+        depth = imageio.imread(path)
+    else:
+        depth = np.array(Image.open(path)).astype(np.float32)
 
-    depth = torch.from_numpy(imageio.imread(path))
+    # depth = 
+    # depth = torchvision.transforms.functional.pil_to_tensor(Image.open(path))[None,...]
+
+    depth = torch.from_numpy(depth)
+    
     if depth.dim() == 2:
         depth = depth[..., None]
     depth = depth.to(dtype=torch.float32)

@@ -1,13 +1,25 @@
 import pathlib
+import sys
 
 import torch
+import torch.nn.functional as F
 import scipy.ndimage
 from omegaconf import OmegaConf, DictConfig
 
 from diffhandles.stable_null_inverter import StableNullInverter
 from diffhandles.guided_stable_diffuser import GuidedStableDiffuser
-from diffhandles.depth_transform import transform_depth, normalize_depth
-from diffhandles.utils import solve_laplacian_depth
+from diffhandles.depth_transform import transform_depth, normalize_depth, get_correspondences
+from diffhandles.utils import solve_laplacian_depth, unpack_correspondences
+
+import imageio.v3 as imageio
+def save_image(img: torch.Tensor, path: str):
+    img = img.detach().cpu()
+    img = img * 255.0
+    img = img.permute(1, 2, 0)
+    img = img.to(dtype=torch.uint8)
+    if img.shape[-1] == 1:
+        img = img[..., 0]
+    imageio.imwrite(path, img.numpy())
 
 
 class DiffusionHandles:
@@ -81,11 +93,11 @@ class DiffusionHandles:
 
         # perform first diffusion inference pass to get intermediate features
         with torch.no_grad():
-            activations, latent_image, null_text_emb, init_noise = self.diffuser.initial_inference(
+            activations, latent_image, null_text_emb, init_noise, latents_list = self.diffuser.initial_inference(
                 init_latents=init_noise, depth=disparity, uncond_embeddings=null_text_emb,
                 prompt=prompt)
 
-        return null_text_emb, init_noise, activations, latent_image
+        return null_text_emb, init_noise, activations, latent_image, latents_list
     
     def set_foreground(self, depth: torch.Tensor, fg_mask: torch.Tensor, bg_depth: torch.Tensor) -> torch.Tensor:
         """
@@ -147,6 +159,13 @@ class DiffusionHandles:
                 rot_angle=rot_angle, rot_axis=rot_axis, translation=translation,
                 use_input_depth_normalization=use_input_depth_normalization,
                 depth_transform_mode=self.conf.depth_transform_mode)
+            
+        print(edited_disparity)
+            
+        # edited_disparity = bg_depth
+        # save_image((depth/depth.max())[0], 'depth.png')
+        # save_image((bg_depth/bg_depth.max())[0], 'bg_depth.png')
+        # save_image((edited_disparity/edited_disparity.max())[0], 'edited_disparity.png')
 
         # perform second diffusion inference pass guided by the 3d-transformed features
         with torch.no_grad():
@@ -164,3 +183,132 @@ class DiffusionHandles:
         else:
             edited_img = results
             return edited_img, edited_disparity
+        
+    def transform_foreground_composite(
+            self, 
+            fg_prompt: str, bg_prompt: str, composite_prompt: str,
+            fg_depth: torch.Tensor, bg_depth: torch.Tensor, composite_depth: torch.Tensor, composite_inverted_depth: torch.Tensor,
+            fg_mask:torch.Tensor,
+            composite_mask:torch.Tensor, 
+            fg_latents: list[torch.Tensor], bg_latents: list[torch.Tensor],
+            fg_null_text_emb: torch.Tensor, bg_null_text_emb: torch.Tensor, 
+            fg_init_noise: torch.Tensor, bg_init_noise: torch.Tensor, 
+            fg_activations: list[torch.Tensor], bg_activations: list[torch.Tensor],
+            rot_angle: float = None, rot_axis: torch.Tensor = None, translation: torch.Tensor = None,
+            fg_weight: float = None, bg_weight: float = None, use_input_depth_normalization=False):
+        
+        # 3d-transform depth
+        with torch.no_grad():
+            # correspondences = torch.load("/diffusion/DiffusionHandles/ml-depth-pro/data_process/correspondences.pt")
+            correspondences, rendered_depth = transform_depth(
+                depth=composite_depth, bg_depth=bg_depth, fg_mask=composite_mask,
+                intrinsics=self.diffuser.get_depth_intrinsics(device=composite_depth.device),
+                rot_angle=rot_angle, rot_axis=rot_axis, translation=translation,
+                use_input_depth_normalization=use_input_depth_normalization,
+                depth_transform_mode=self.conf.depth_transform_mode)
+                
+            # original_x, original_y, transformed_x, transformed_y = unpack_correspondences(correspondences)
+            # src_depth = 1.0 / composite_depth[0, 0].detach().cpu().numpy()
+            # tgt_depth = rendered_depth  # recommended if you returned it
+            # visualize_correspondences_to_file(
+            #     depth_src=src_depth,
+            #     depth_tgt=tgt_depth,
+            #     original_x=original_x,
+            #     original_y=original_y,
+            #     transformed_x=transformed_x,
+            #     transformed_y=transformed_y,
+            #     save_path="./depth_correspondences.png",
+            #     max_lines=20
+            # )
+            
+            # import sys
+            # sys.exit(0)
+
+            
+            # get_correspondences(
+            #     depth_new=composite_depth, depth_orig=fg_depth, fg_mask=fg_mask, mask_new=composite_mask,
+            #     intrinsics=self.diffuser.get_depth_intrinsics(device=composite_depth.device))        
+        
+        edited_disparity = composite_inverted_depth
+
+        print("FG Mask Shape:", fg_mask.shape)
+        # Assume `x` is shape [1, 1, 512, 512]
+        fg_mask = F.interpolate(fg_mask, size=(64, 64), mode='bilinear', align_corners=False)  # [1, 1, 64, 64]
+        fg_mask = fg_mask.expand(-1, 4, -1, -1)  # [1, 4, 64, 64]
+        print("FG Mask Shape:", fg_mask.shape)
+
+        print("Composite Mask Shape:", composite_mask.shape)
+        # Assume `x` is shape [1, 1, 512, 512]
+        composite_mask = F.interpolate(composite_mask, size=(64, 64), mode='bilinear', align_corners=False)  # [1, 1, 64, 64]
+        composite_mask = composite_mask.expand(-1, 4, -1, -1)  # [1, 4, 64, 64]
+        print("Composite Mask Shape:", composite_mask.shape)
+
+        with torch.no_grad():
+            results = self.diffuser.guided_inference_composite(
+                bg_latents_init=bg_init_noise,
+                fg_latents=fg_latents, bg_latents=bg_latents,
+                depth=edited_disparity, fg_mask_latents=fg_mask, composite_mask_latents=composite_mask,
+                fg_uncond_embeddings=fg_null_text_emb, bg_uncond_embeddings=bg_null_text_emb,
+                fg_prompt=fg_prompt, bg_prompt=bg_prompt, composite_prompt=composite_prompt,
+                fg_activations=fg_activations, bg_activations=bg_activations,
+                correspondences=correspondences,
+                fg_weight=fg_weight, bg_weight=bg_weight,
+                save_denoising_steps=self.conf.guided_diffuser.save_denoising_steps)
+
+        if self.conf.guided_diffuser.save_denoising_steps:
+            edited_img, denoising_steps = results
+            return edited_img, edited_disparity, denoising_steps
+        else:
+            edited_img = results
+            return edited_img, edited_disparity
+
+import os
+import cv2
+import numpy as np
+
+def visualize_correspondences_to_file(
+    depth_src,
+    depth_tgt,
+    original_x, original_y,
+    transformed_x, transformed_y,
+    save_path,
+    max_lines=3000
+):
+    """
+    Saves a side-by-side correspondence visualization to disk.
+    """
+
+    # Ensure numpy + flatten
+    ox = np.asarray(original_x).squeeze()
+    oy = np.asarray(original_y).squeeze()
+    tx = np.asarray(transformed_x).squeeze()
+    ty = np.asarray(transformed_y).squeeze()
+
+    H, W = depth_src.shape
+
+    def norm_depth(d):
+        d = d.copy()
+        d[np.isinf(d)] = 0
+        d = (d - d.min()) / (d.max() - d.min() + 1e-6)
+        return (d * 255).astype(np.uint8)
+
+    src_img = cv2.cvtColor(norm_depth(depth_src), cv2.COLOR_GRAY2BGR)
+    tgt_img = cv2.cvtColor(norm_depth(depth_tgt), cv2.COLOR_GRAY2BGR)
+
+    canvas = np.hstack([src_img, tgt_img])
+
+    # Subsample for clarity
+    N = len(ox)
+    idxs = np.random.choice(N, min(max_lines, N), replace=False)
+
+    for i in idxs:
+        color = tuple(np.random.randint(0, 255, size=3).tolist())
+        p1 = (int(ox[i]), int(oy[i]))
+        p2 = (int(tx[i] + W), int(ty[i]))  # shift right image
+
+        cv2.line(canvas, p1, p2, color, 1)
+        cv2.circle(canvas, p1, 2, color, -1)
+        cv2.circle(canvas, p2, 2, color, -1)
+
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    cv2.imwrite(save_path, canvas)

@@ -7,3 +7,11 @@ test/results
 webapp/results
 
 **/.ipynb_checkpoints
+
+# additions
+*.pth
+*.pt
+*.exr
+/data/
+/output/
+checkpoints/
