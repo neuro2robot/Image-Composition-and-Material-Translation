@@ -16,9 +16,9 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--R", type=int, default=0, help="Red value (0-255)")
 parser.add_argument("--G", type=int, default=0, help="Green value (0-255)")
 parser.add_argument("--B", type=int, default=255, help="Blue value (0-255)")
-parser.add_argument("--object_root_dir", default="/home/nahar4/Desktop/diffusion/blender_files/objects/all", help="Directory containing .blend object folders")
+parser.add_argument("--object_root_dir", default="./blender_files/objects/all", help="Directory containing .blend object folders")
 parser.add_argument("--output_root_dir", default=None, help="Root output directory for the generated dataset")
-parser.add_argument("--hdr_path", default="/home/nahar4/Desktop/diffusion/blender_files/scenes/studio_small_03_1k.hdr", help="Path to the HDR environment texture")
+parser.add_argument("--hdr_path", default="./blender_files/scenes/studio_small_03_1k.hdr", help="Path to the HDR environment texture")
 parser.add_argument("--render_resolution", type=int, default=512, help="Render resolution")
 parser.add_argument("--num_samples", type=int, default=20, help="Number of image pairs to generate")
 args = parser.parse_args(argv)
@@ -41,10 +41,10 @@ albedo_min_strength = 0.2
 albedo_max_strength = 3.0
 roughness_min_strength = 0.0
 roughness_max_strength = 1.0
-metal_texture_dir = "/home/nahar4/Desktop/diffusion/blender_files/textures/Metal044A_1K-JPG"
+metal_texture_dir = "./blender_files/textures/Metal044A_1K-JPG"
 metalness_min_strength = 0.0
 metalness_max_strength = 5.0
-rust_texture_dir = "/home/nahar4/Desktop/diffusion/blender_files/textures/Rust_1K-JPG"
+rust_texture_dir = "./blender_files/textures/Rust_1K-JPG"
 rust_min_strength = 0.0
 rust_max_strength = 5.0
 

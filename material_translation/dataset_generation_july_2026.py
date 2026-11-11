@@ -23,9 +23,9 @@ argv = sys.argv
 argv = argv[argv.index("--") + 1:] if "--" in argv else []
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--object_root_dir", default="/home/nahar4/Desktop/diffusion/blender_files/objects/all", help="Directory containing object folders")
-parser.add_argument("--output_root_dir", default="/home/nahar4/Desktop/diffusion/zest_code/demo_assets/texture_dir/blender_output_july_2026", help="Where to save the generated images")
-parser.add_argument("--hdr_path", default="/home/nahar4/Desktop/diffusion/blender_files/scenes/studio_small_03_1k.hdr", help="Path to the HDR environment")
+parser.add_argument("--object_root_dir", default="./blender_files/objects/all", help="Directory containing object folders")
+parser.add_argument("--output_root_dir", default="./demo_assets/texture_dir/blender_output_july_2026", help="Where to save the generated images")
+parser.add_argument("--hdr_path", default="./blender_files/scenes/studio_small_03_1k.hdr", help="Path to the HDR environment")
 parser.add_argument("--render_resolution", type=int, default=512, help="Render resolution")
 args = parser.parse_args(argv)
 
