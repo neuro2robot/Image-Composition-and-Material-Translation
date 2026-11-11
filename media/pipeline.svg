@@ -60,7 +60,7 @@
     <path d="M625,150 H445 V215"/>
   </g>
   <g fill="#555" font-size="11">
-    <text x="318" y="68">Image-1/2 depth</text>
+    <text x="318" y="68">Image-1 / Image-2 depth</text>
     <text x="505" y="68">composite depth</text>
     <text x="318" y="158">activations &amp; latents</text>
     <text x="632" y="160">composite image</text>
